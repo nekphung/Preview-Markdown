@@ -4,6 +4,16 @@
 >
 > Tài liệu gồm: sơ đồ, danh sách quan hệ, từ điển dữ liệu từng bảng, kiểu enum, ràng buộc/chỉ mục đề xuất và quyền truy cập dự kiến. Đây vẫn là thiết kế **sơ bộ**: khi làm S1-02, S2-02, S3-02, S4-03 nhóm sẽ viết thành file migration trong `db/migrations/` và được phép chỉnh lại, **sửa luôn file này trong cùng Pull Request**.
 
+## 0. Nguồn và phạm vi
+
+| Mục | Nội dung |
+|---|---|
+| Tài liệu này bám theo | [`CODING_CONVENTION.md`](../CODING_CONVENTION.md) §11 (đặt tên, `created_at`/`updated_at`, soft delete, RLS, vector) và [`RULES.md`](../RULES.md) §4.4 |
+| Phạm vi nghiệp vụ | [`Khảo sát thực trạng&Phạm vi bài toán.md`](<Khảo sát thực trạng&Phạm vi bài toán.md>) — 6 nhóm phân hệ cốt lõi |
+| SRS | **Chưa có trong repo.** Mọi chỗ tài liệu này nhắc "SRS" là để tham chiếu tới tài liệu sẽ viết ở S0-02; khi SRS có, phải đối chiếu lại §8 và §10 |
+| Mã task liên quan | S1-02 (profiles/faculties), S2-02 (quy chế, danh bạ, thông báo), S3-02 (tài liệu, kiểm duyệt, điểm), S4-03 (Knowledge Base, `pgvector`) |
+| Khi nào được sửa | Cùng Pull Request với migration tương ứng. Không sửa migration đã gộp vào `staging`/`main` (`CODING_CONVENTION.md` §11.2) |
+
 ## 1. Quy ước chung
 
 - Tên bảng, cột: `snake_case`; tên bảng số nhiều (mục 11.1 của `CODING_CONVENTION.md`).
@@ -14,28 +24,37 @@
 - Chuỗi dùng kiểu `text`. Ràng buộc khai báo ngay trong database: `NOT NULL`, `UNIQUE`, `CHECK`, khóa ngoại.
 - Email và mật khẩu **không** nằm trong `profiles`; chúng ở `auth.users` do Supabase Auth quản lý.
 
+### 1.1 Ghi chú kỹ thuật cho người viết migration
+
+- **Cột `updated_at`**: viết một trigger duy nhất rồi gắn vào mọi bảng có cột này, đừng mỗi bảng một kiểu.
+- **`gen_random_uuid()`**: có sẵn từ PostgreSQL 13, **không** cần extension `pgcrypto`. Nhóm kiểm tra phiên bản PostgreSQL của dự án Supabase trước khi viết migration (task khởi tạo database) để chắc chắn ≥ 13.
+- **`pgvector`**: bảng `kb_chunks` cần bật extension `vector` trước khi tạo cột `embedding`. Số chiều `N` chốt ở S4-03; đổi số chiều = migration mới + đánh chỉ mục lại toàn bộ vector.
+- **Trình tự migration**: tạo bảng cha trước → tạo bảng con → thêm `CHECK` phụ thuộc (`documents.reject_reason`) → tạo index → bật RLS và viết policy.
+
 ## 2. Sơ đồ
 
 Sơ đồ viết bằng Mermaid nên GitHub hiển thị trực tiếp; sửa sơ đồ bằng Pull Request như sửa code.
 
+Quy ước đọc: `||` = bắt buộc có (NOT NULL) · `o|` = có thể trống (NULL) · `o{` = nhiều.
+
 ```mermaid
 erDiagram
-    faculties |o--o{ profiles : "có sinh viên"
-    faculties |o--o{ contacts : "có danh bạ"
-    faculties |o--o{ regulations : "có quy chế"
-    faculties |o--o{ notification_sources : "có nguồn"
+    faculties o|--o{ profiles : "có sinh viên"
+    faculties o|--o{ contacts : "có danh bạ"
+    faculties o|--o{ regulations : "có quy chế"
+    faculties o|--o{ notification_sources : "có nguồn"
     faculties ||--o{ courses : "có môn học"
-    faculties |o--o{ templates : "có template"
+    faculties o|--o{ templates : "có template"
     profiles ||--o{ documents : "tải lên"
-    profiles |o--o{ documents : "kiểm duyệt"
+    profiles o|--o{ documents : "kiểm duyệt"
     profiles ||--o{ point_transactions : "nhận điểm"
     profiles ||--o{ templates : "đăng"
     profiles ||--o{ kb_documents : "tải lên"
-    profiles |o--o{ notifications : "nhập thủ công"
+    profiles o|--o{ notifications : "nhập thủ công"
     courses ||--o{ documents : "có tài liệu"
-    documents |o--o{ point_transactions : "sinh điểm"
+    documents o|--o{ point_transactions : "sinh điểm"
     notification_sources ||--o{ notifications : "cung cấp"
-    regulations |o--o{ kb_documents : "nguồn của"
+    regulations o|--o{ kb_documents : "nguồn của"
     kb_documents ||--o{ kb_chunks : "được cắt thành"
 
     faculties {
@@ -203,6 +222,8 @@ erDiagram
     }
 ```
 
+`auth.users` (bảng của Supabase Auth) không vẽ vào sơ đồ nhưng có quan hệ 1–1 với `profiles`, xem bảng ở mục 3.
+
 ## 3. Danh sách quan hệ
 
 Hành vi khi xóa (`ON DELETE`): hệ thống dùng **xóa mềm** nên hầu hết là `RESTRICT` (không cho xóa thật nếu còn dữ liệu con). Không dùng `SET NULL` cho `faculty_id` vì làm dữ liệu của một Khoa vô tình thành dữ liệu cấp Trường.
@@ -232,7 +253,7 @@ Hành vi khi xóa (`ON DELETE`): hệ thống dùng **xóa mềm** nên hầu h�
 
 ## 4. Từ điển dữ liệu
 
-Cột "Ràng buộc": `PK` khóa chính · `FK` khóa ngoại · `NN` `NOT NULL` · `UQ` duy nhất.
+Cột "Ràng buộc": `PK` khóa chính · `FK` khóa ngoại · `NN` `NOT NULL` · `UQ` duy nhất. `trống được` = cho phép `NULL`.
 
 ### 4.1 `faculties` — Khoa
 
@@ -241,8 +262,8 @@ Cột "Ràng buộc": `PK` khóa chính · `FK` khóa ngoại · `NN` `NOT NULL`
 | `id` | `uuid` | PK | |
 | `code` | `text` | NN, UQ | Mã Khoa |
 | `name` | `text` | NN | Tên Khoa |
-| `website_url` | `text` | | Trang chính thức của Khoa |
-| `created_at`, `updated_at` | `timestamptz` | NN | |
+| `website_url` | `text` | trống được | Trang chính thức của Khoa |
+| `created_at`, `updated_at` | `timestamptz` | NN, NN | |
 
 ### 4.2 `profiles` — Hồ sơ người dùng
 
@@ -251,15 +272,15 @@ Cột "Ràng buộc": `PK` khóa chính · `FK` khóa ngoại · `NN` `NOT NULL`
 | `id` | `uuid` | PK, FK → `auth.users.id` | |
 | `faculty_id` | `uuid` | FK → `faculties.id` | Người dùng tự do có thể để trống |
 | `full_name` | `text` | NN | |
-| `student_id` | `text` | UQ | MSSV; trống với người dùng tự do |
-| `cohort` | `smallint` | | Khóa học |
-| `avatar_url` | `text` | | |
-| `role` | `user_role` | NN, mặc định `STUDENT` | **Người dùng không được tự sửa** |
-| `has_student_email` | `boolean` | NN, mặc định `false` | Đặt `true` khi email thuộc `@student.hcmus.edu.vn` |
-| `is_locked` | `boolean` | NN, mặc định `false` | Khóa tài khoản vi phạm |
-| `total_points` | `int` | NN, mặc định `0`, `CHECK (total_points >= 0)` | Số lưu sẵn, cập nhật cùng `point_transactions` |
-| `level` | `int` | NN, mặc định `1`, `CHECK (level >= 1)` | Suy ra từ điểm |
-| `created_at`, `updated_at` | `timestamptz` | NN | |
+| `student_id` | `text` | UQ | MSSV; trống với người dùng tự do. Nhiều dòng trống vẫn được (NULL không trùng nhau trong PostgreSQL) |
+| `cohort` | `smallint` | trống được | Khóa học, ví dụ `2024` |
+| `avatar_url` | `text` | trống được | |
+| `role` | `user_role` | NN, mặc định `STUDENT` | **Người dùng không được tự sửa**; chỉ Admin đổi |
+| `has_student_email` | `boolean` | NN, mặc định `false` | Đặt `true` khi email thuộc `@student.hcmus.edu.vn`. **Ghi bởi backend** khi tạo hồ sơ, người dùng không tự sửa |
+| `is_locked` | `boolean` | NN, mặc định `false` | Khóa tài khoản vi phạm; chỉ Admin đổi |
+| `total_points` | `int` | NN, mặc định `0`, `CHECK (total_points >= 0)` | Số lưu sẵn để xếp hạng nhanh. **Chỉ server ghi**, trong cùng transaction với `point_transactions` |
+| `level` | `int` | NN, mặc định `1`, `CHECK (level >= 1)` | Suy ra từ điểm; cùng transaction với `total_points` |
+| `created_at`, `updated_at` | `timestamptz` | NN, NN | |
 
 ### 4.3 `contacts` — Danh bạ học vụ
 
@@ -268,9 +289,9 @@ Cột "Ràng buộc": `PK` khóa chính · `FK` khóa ngoại · `NN` `NOT NULL`
 | `id` | `uuid` | PK | |
 | `faculty_id` | `uuid` | FK | Trống = cấp Trường (Phòng Đào tạo, Phòng CTSV...) |
 | `unit_name` | `text` | NN | |
-| `email`, `hotline`, `fanpage_url` | `text` | | `CHECK`: ít nhất một trong ba cột có giá trị |
+| `email`, `hotline`, `fanpage_url` | `text` | trống được | `CHECK`: ít nhất một trong ba cột có giá trị |
 | `source_url` | `text` | NN | Nguồn chính thức của thông tin |
-| `last_verified_at` | `date` | | Lần cuối nhóm đối chiếu với nguồn |
+| `last_verified_at` | `date` | trống được | Lần cuối nhóm đối chiếu với nguồn |
 | `created_at`, `updated_at`, `deleted_at` | `timestamptz` | NN, NN, trống được | |
 
 ### 4.4 `regulations` — Cẩm nang quy chế
@@ -281,13 +302,13 @@ Cột "Ràng buộc": `PK` khóa chính · `FK` khóa ngoại · `NN` `NOT NULL`
 | `faculty_id` | `uuid` | FK | Trống = toàn Trường |
 | `title` | `text` | NN | |
 | `category` | `regulation_category` | NN | |
-| `applicable_cohort` | `text` | | Khóa/ngành áp dụng, ví dụ "Khóa 2024 trở đi" |
-| `summary` | `text` | | Tóm lược |
-| `file_path` | `text` | | Bản PDF (cũng dùng lại cho Knowledge Base ở Sprint 4) |
+| `applicable_cohort` | `text` | trống được | Khóa/ngành áp dụng, ví dụ "Khóa 2024 trở đi". ⚠️ Cột chữ tự do, **chưa lọc được theo khóa** — xem §10 |
+| `summary` | `text` | trống được | Tóm lược |
+| `file_path` | `text` | trống được | Bản PDF (cũng dùng lại cho Knowledge Base ở Sprint 4) |
 | `source_url` | `text` | NN | Link văn bản chính thức |
-| `effective_date` | `date` | | Ngày có hiệu lực |
+| `effective_date` | `date` | trống được | Ngày có hiệu lực |
 | `expired_at` | `date` | `CHECK (expired_at >= effective_date)` | Trống = còn hiệu lực; tránh dùng quy định cũ |
-| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | | |
+| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | NN, NN, trống được | |
 
 ### 4.5 `email_templates` — Mẫu email học vụ
 
@@ -297,8 +318,8 @@ Cột "Ràng buộc": `PK` khóa chính · `FK` khóa ngoại · `NN` `NOT NULL`
 | `title` | `text` | NN | Ví dụ "Xin hoãn thi" |
 | `category` | `text` | NN | Khiếu nại điểm, hoãn thi, nộp chứng chỉ... |
 | `body` | `text` | NN | Nội dung mẫu, dùng cho nút sao chép |
-| `receiver_hint` | `text` | | Hướng dẫn nơi tiếp nhận |
-| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | | |
+| `receiver_hint` | `text` | trống được | Hướng dẫn nơi tiếp nhận |
+| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | NN, NN, trống được | |
 
 ### 4.6 `notification_sources` — Nguồn thu thập thông báo
 
@@ -307,11 +328,11 @@ Cột "Ràng buộc": `PK` khóa chính · `FK` khóa ngoại · `NN` `NOT NULL`
 | `id` | `uuid` | PK | |
 | `faculty_id` | `uuid` | FK | Trống = Trường hoặc Phòng ban |
 | `name` | `text` | NN | Tên đơn vị đăng, hiển thị ở "Đơn vị đăng" |
-| `url` | `text` | UQ | Trang nguồn; trống nếu `kind = MANUAL` |
+| `url` | `text` | UQ một phần | Trang nguồn; trống nếu `kind = MANUAL`. Xem §6 về `deleted_at` |
 | `kind` | `source_kind` | NN | `AUTO` thu thập tự động, `MANUAL` nhập tay |
 | `is_active` | `boolean` | NN, mặc định `true` | Tắt nguồn mà không xóa |
-| `last_crawled_at` | `timestamptz` | | Lần thu thập gần nhất |
-| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | | |
+| `last_crawled_at` | `timestamptz` | trống được | Lần thu thập gần nhất; **chỉ bộ thu thập (backend) ghi** |
+| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | NN, NN, trống được | |
 
 ### 4.7 `notifications` — Thông báo
 
@@ -321,13 +342,13 @@ Cột "Ràng buộc": `PK` khóa chính · `FK` khóa ngoại · `NN` `NOT NULL`
 | `source_id` | `uuid` | NN, FK | Đơn vị đăng |
 | `created_by` | `uuid` | FK → `profiles.id` | Chỉ có khi nhập thủ công |
 | `title` | `text` | NN | |
-| `summary` | `text` | | **Chỉ lưu tóm lược**, không sao chép toàn văn |
+| `summary` | `text` | trống được | **Chỉ lưu tóm lược**, không sao chép toàn văn |
 | `tag` | `text` | NN | |
 | `published_at` | `timestamptz` | NN | Ngày đăng |
-| `deadline_at` | `timestamptz` | | Trống = không có hạn |
-| `source_url` | `text` | UQ | Liên kết "Xem bản gốc"; dùng loại trùng. Có thể trống với thông báo nhập tay |
+| `deadline_at` | `timestamptz` | trống được | Trống = không có hạn |
+| `source_url` | `text` | UQ một phần | Liên kết "Xem bản gốc"; dùng loại trùng. Có thể trống với thông báo nhập tay. Xem §6 về `deleted_at` |
 | `is_hidden` | `boolean` | NN, mặc định `false` | Moderator ẩn thông báo lỗi |
-| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | | |
+| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | NN, NN, trống được | |
 
 Nhãn "Sắp hết hạn"/"Đã hết hạn" **không lưu**, tính từ `deadline_at` lúc truy vấn theo giờ Việt Nam.
 
@@ -337,9 +358,9 @@ Nhãn "Sắp hết hạn"/"Đã hết hạn" **không lưu**, tính từ `deadli
 |---|---|---|---|
 | `id` | `uuid` | PK | |
 | `faculty_id` | `uuid` | NN, FK | |
-| `code` | `text` | NN, UQ | Mã môn |
+| `code` | `text` | NN, UQ một phần | Mã môn. Xem §6 về `deleted_at` |
 | `name` | `text` | NN | |
-| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | | |
+| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | NN, NN, trống được | |
 
 ### 4.9 `documents` — Tài liệu học tập
 
@@ -348,19 +369,19 @@ Nhãn "Sắp hết hạn"/"Đã hết hạn" **không lưu**, tính từ `deadli
 | `id` | `uuid` | PK | |
 | `uploader_id` | `uuid` | NN, FK → `profiles.id` | |
 | `course_id` | `uuid` | NN, FK | |
-| `reviewed_by` | `uuid` | FK → `profiles.id` | Trống khi chưa duyệt |
+| `reviewed_by` | `uuid` | FK → `profiles.id` | Trống khi chưa duyệt; **chỉ Moderator/Admin ghi** |
 | `title` | `text` | NN | |
-| `description` | `text` | | |
+| `description` | `text` | trống được | |
 | `doc_type` | `document_type` | NN | Loại tài liệu |
-| `semester` | `text` | NN | Học kỳ để lọc |
+| `semester` | `text` | NN | Học kỳ để lọc. ⚠️ Cột chữ tự do, cần thống nhất định dạng — xem §10 |
 | `file_path` | `text` | NN | Đường dẫn trong Storage, chưa gắn với Cloudinary hay Supabase (S3-03) |
-| `file_name`, `mime_type` | `text` | | Tên gốc, loại tệp |
-| `file_size_bytes` | `bigint` | `CHECK (file_size_bytes > 0)` | |
+| `file_name`, `mime_type` | `text` | trống được | Tên gốc, loại tệp |
+| `file_size_bytes` | `bigint` | trống được, `CHECK (file_size_bytes > 0)` | |
 | `status` | `document_status` | NN, mặc định `PENDING` | Chỉ `APPROVED` mới công khai |
-| `reject_reason` | `text` | | `CHECK`: bắt buộc khi `status = 'REJECTED'` |
-| `reviewed_at` | `timestamptz` | | |
-| `download_count` | `int` | NN, mặc định `0`, `CHECK (>= 0)` | |
-| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | | |
+| `reject_reason` | `text` | trống được | `CHECK`: bắt buộc có giá trị khi `status = 'REJECTED'` |
+| `reviewed_at` | `timestamptz` | trống được | **Chỉ Moderator/Admin ghi**, đặt cùng lúc đổi `status` |
+| `download_count` | `int` | NN, mặc định `0`, `CHECK (>= 0)` | **Backend tăng khi có lượt tải**, người dùng không tự sửa |
+| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | NN, NN, trống được | |
 
 ### 4.10 `templates` — Kho template báo cáo/slide
 
@@ -370,11 +391,11 @@ Nhãn "Sắp hết hạn"/"Đã hết hạn" **không lưu**, tính từ `deadli
 | `faculty_id` | `uuid` | FK | Trống = dùng chung toàn Trường |
 | `uploaded_by` | `uuid` | NN, FK → `profiles.id` | |
 | `title` | `text` | NN | |
-| `description` | `text` | | |
+| `description` | `text` | trống được | |
 | `file_type` | `template_file_type` | NN | |
 | `file_path` | `text` | NN | |
-| `download_count` | `int` | NN, mặc định `0` | |
-| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | | |
+| `download_count` | `int` | NN, mặc định `0` | **Backend tăng khi có lượt tải** |
+| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | NN, NN, trống được | |
 
 ### 4.11 `point_transactions` — Sổ điểm (chỉ ghi thêm)
 
@@ -387,7 +408,7 @@ Nhãn "Sắp hết hạn"/"Đã hết hạn" **không lưu**, tính từ `deadli
 | `reason` | `point_reason` | NN | |
 | `created_at` | `timestamptz` | NN | Không có `updated_at` vì không sửa dòng đã ghi |
 
-Ràng buộc duy nhất `UNIQUE (document_id, reason)` đảm bảo **một tài liệu chỉ được cộng điểm một lần** cho cùng một lý do, kể cả khi Moderator bấm duyệt lại.
+Ràng buộc **một phần** `UNIQUE (document_id, reason) WHERE document_id IS NOT NULL` đảm bảo **một tài liệu chỉ được cộng điểm một lần** cho cùng một lý do, kể cả khi Moderator bấm duyệt lại; đồng thời vẫn cho phép nhiều dòng điều chỉnh tay (`document_id` trống). Xem §6.
 
 ### 4.12 `kb_documents` — Văn bản trong Knowledge Base
 
@@ -398,12 +419,12 @@ Ràng buộc duy nhất `UNIQUE (document_id, reason)` đảm bảo **một tài
 | `uploaded_by` | `uuid` | NN, FK → `profiles.id` | Chỉ Admin |
 | `title` | `text` | NN | Dùng khi trích dẫn nguồn |
 | `file_path` | `text` | NN | |
-| `source_url` | `text` | | Link văn bản chính thức |
-| `effective_date` | `date` | | Để AI không trả lời theo quy định đã hết hiệu lực |
-| `status` | `kb_status` | NN, mặc định `INDEXING` | |
-| `error_message` | `text` | | Lý do khi `FAILED` |
+| `source_url` | `text` | trống được | Link văn bản chính thức |
+| `effective_date` | `date` | trống được | Để AI không trả lời theo quy định đã hết hiệu lực |
+| `status` | `kb_status` | NN, mặc định `INDEXING` | **Backend ghi** khi đánh chỉ mục xong hoặc lỗi |
+| `error_message` | `text` | trống được | Lý do khi `FAILED` |
 | `is_active` | `boolean` | NN, mặc định `true` | Tắt để AI ngừng dùng văn bản |
-| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | | |
+| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | NN, NN, trống được | |
 
 ### 4.13 `kb_chunks` — Đoạn văn bản và vector
 
@@ -413,9 +434,9 @@ Ràng buộc duy nhất `UNIQUE (document_id, reason)` đảm bảo **một tài
 | `kb_document_id` | `uuid` | NN, FK | `ON DELETE CASCADE` |
 | `chunk_index` | `int` | NN | Thứ tự đoạn; `UNIQUE (kb_document_id, chunk_index)` |
 | `content` | `text` | NN | Nội dung đoạn |
-| `page_ref` | `text` | | Trang/điều khoản để trích dẫn |
+| `page_ref` | `text` | trống được | Trang/điều khoản để trích dẫn |
 | `embedding` | `vector(N)` | NN | Số chiều `N` theo mô hình embedding, chốt ở S4-03 |
-| `created_at` | `timestamptz` | NN | |
+| `created_at` | `timestamptz` | NN | Không có `updated_at`: đánh chỉ mục lại = xóa rồi thêm |
 
 ## 5. Kiểu enum
 
@@ -434,15 +455,29 @@ Luồng trạng thái tài liệu: `PENDING → APPROVED` hoặc `PENDING → RE
 
 ## 6. Ràng buộc và chỉ mục đề xuất
 
+### 6.1 Quy tắc chung
+
+- **Bảng có `deleted_at` thì `UNIQUE` phải là chỉ mục duy nhất một phần** (`... WHERE deleted_at IS NULL`). Lý do: nếu `UNIQUE` thường thì sau khi xóa mềm một mã môn hay một URL thông báo, không thêm lại được bản ghi mới trùng giá trị cũ — sẽ kẹt cả vòng đời.
+  - Áp dụng cho: `courses.code`, `notification_sources.url`, `notifications.source_url`.
+- **PostgreSQL không tự tạo chỉ mục cho cột khóa ngoại.** Mọi cột khóa ngoại dùng để lọc/join đều phải khai báo chỉ mục tay.
+- Cột `uuid` cần vòng phân trang (keyset) thì cần một chỉ mục theo cột sắp xếp (ví dụ `(published_at DESC)`), không dựa vào `OFFSET`.
+
+### 6.2 Danh sách đề xuất
+
 | Mục tiêu | Đề xuất |
 |---|---|
-| Không cộng điểm trùng | `UNIQUE (document_id, reason)` trên `point_transactions` |
-| Loại thông báo trùng | `UNIQUE (source_url)` trên `notifications` |
-| Tìm tài liệu < 1 giây | Chỉ mục tìm kiếm toàn văn (GIN) trên `documents.title`, `courses.code`/`courses.name`; chỉ mục `(status, course_id)`. Cần cân nhắc tìm không dấu tiếng Việt (ví dụ extension `unaccent`) |
-| Lọc và sắp xếp thông báo | Chỉ mục `(published_at DESC)` và `(deadline_at)` trên `notifications` |
+| Không cộng điểm trùng | `UNIQUE (document_id, reason) WHERE document_id IS NOT NULL` trên `point_transactions` |
+| Loại thông báo trùng | Chỉ mục duy nhất một phần trên `notifications (source_url) WHERE deleted_at IS NULL` |
+| Tạo lại mã môn / URL nguồn sau khi xóa mềm | Chỉ mục duy nhất một phần trên `courses (code) WHERE deleted_at IS NULL` và `notification_sources (url) WHERE deleted_at IS NULL` |
+| Lọc nhanh theo Khoa (yêu cầu ở §8) | Chỉ mục đơn trên: `contacts.faculty_id`, `regulations.faculty_id`, `courses.faculty_id`, `templates.faculty_id`, `profiles.faculty_id` |
+| Lọc và sắp xếp thông báo | Chỉ mục `(published_at DESC)` và `(deadline_at)` trên `notifications`; thêm `is_hidden` vào đầu chỉ mục `published_at` nếu truy vấn luôn lọc thông báo bị ẩn |
 | Hàng đợi kiểm duyệt | Chỉ mục `(status, created_at)` trên `documents` |
+| Sổ điểm của một người | Chỉ mục `(user_id, created_at DESC)` trên `point_transactions`; chỉ mục `(course_id)` và `(uploader_id)` trên `documents` |
 | Bảng xếp hạng | Chỉ mục `(total_points DESC)` trên `profiles` |
+| Tìm tài liệu < 1 giây | Chỉ mục tìm kiếm toàn văn (GIN) trên `documents.title`, `courses.code`/`courses.name`; chỉ mục `(status, course_id)`. Cần cân nhắc tìm không dấu tiếng Việt — xem ghi chú bên dưới |
 | Tìm vector | Chỉ mục vector (ví dụ HNSW) trên `kb_chunks.embedding`, chốt ở S4-03 |
+
+**Ghi chú tìm tiếng Việt không dấu:** hàm `unaccent()` mặc định **không** mang nhãn `IMMUTABLE`, nên không dùng trực tiếp trong biểu thức chỉ mục được — phải bọc bằng một hàm `IMMUTABLE` của riêng dự án. Cách ít rủi ro hơn cho phiên bản đầu là extension `pg_trgm` (`GIN` với `gin_trgm_ops`) cho tìm gần đúng, rồi chốt ở S3-02.
 
 ## 7. Quyền truy cập dự kiến (RLS)
 
@@ -452,33 +487,41 @@ Bật Row Level Security cho mọi bảng. Phần thực thi chi tiết viết t
 |---|---|---|
 | `faculties`, `contacts`, `regulations`, `email_templates`, `templates`, `courses` | Mọi người dùng (kể cả chưa đăng nhập, nếu nhóm đồng ý công khai) | Admin |
 | `notifications`, `notification_sources` | Mọi người (không gồm thông báo `is_hidden`) | Admin, Moderator; bộ thu thập chạy bằng khóa backend |
-| `profiles` | Chủ hồ sơ; thông tin công khai rút gọn (tên, điểm, level) cho bảng xếp hạng | Chủ hồ sơ sửa thông tin cá nhân; **không** được sửa `role`, `is_locked`, `total_points`, `level`. Admin đổi `role` |
+| `profiles` | Chủ hồ sơ; bảng xếp hạng đọc qua **view công khai** (xem ghi chú bên dưới) | Chủ hồ sơ sửa thông tin cá nhân; **không** được sửa `role`, `is_locked`, `total_points`, `level`, `has_student_email`. Admin đổi `role`, `is_locked` |
 | `documents` | Mọi người xem tài liệu `APPROVED`; chủ tài liệu xem tài liệu của mình; Moderator/Admin xem tất cả | Sinh viên đã đăng nhập thêm tài liệu `PENDING`; chỉ Moderator/Admin đổi `status` |
 | `point_transactions` | Chủ sổ điểm | Chỉ backend (khóa `service`) |
 | `kb_documents`, `kb_chunks` | Backend (để AI truy hồi); Admin xem danh sách | Admin tải lên; backend ghi chunk |
+
+### 7.1 Hai điểm dễ làm sai khi viết policy
+
+1. **RLS chỉ ở mức hàng, không ở mức cột.** Không thể làm policy `profiles` mà vẫn giấu `email`/`student_id` chỉ với RLS. Muốn công khai "tên, điểm, level" cho bảng xếp hạng mà giấu phần còn lại thì phải có **một view** (ví dụ `public_leaderboard`) đánh dấu `SECURITY DEFINER`, chỉ `SELECT` đúng ba cột đó, rồi mới cho phép đọc view. View cũng phải lọc `deleted_at IS NULL` để không lộ dữ liệu đã xóa mềm.
+2. **Đừng đọc `profiles.role` trực tiếp trong policy của bảng khác.** Policy `documents` lấy `role` từ `profiles` sẽ đệ quy RLS trên chính `profiles`. Cách chuẩn: viết hàm helper `SECURITY DEFINER` (ví dụ `is_moderator()`, `is_admin()`) đọc vai trò rồi gọi hàm đó trong policy, và đặt `search_path` cố định cho hàm.
+
+Ngoài ra: `anon` chỉ được chạm vào bảng thực sự cần đọc ở giao diện; mọi thao tác ghi đi qua FastAPI bằng khóa `service` nằm trong `.env` (`CODING_CONVENTION.md` §11.3).
 
 ## 8. Kiểm tra bao phủ yêu cầu
 
 | Yêu cầu | Đáp ứng bằng |
 |---|---|
 | Gắn huy hiệu khi dùng email sinh viên HCMUS | `profiles.has_student_email` |
-| Lọc danh bạ, quy chế theo Khoa | `contacts.faculty_id`, `regulations.faculty_id` |
-| Quy chế theo khóa/ngành, tránh dùng quy định cũ | `regulations.applicable_cohort`, `effective_date`, `expired_at` |
+| Lọc danh bạ, quy chế theo Khoa | `contacts.faculty_id`, `regulations.faculty_id` (+ chỉ mục ở §6) |
+| Quy chế theo khóa/ngành, tránh dùng quy định cũ | `regulations.applicable_cohort`, `effective_date`, `expired_at` — ⚠️ phần "theo khóa" chưa lọc được vì cột là chữ tự do, xem §10 |
 | Mẫu email kèm hướng dẫn nơi tiếp nhận | `email_templates.body`, `receiver_hint` |
 | Thông báo có Tag, Ngày đăng, Tiêu đề, Đơn vị đăng, Deadline | `notifications.tag/published_at/title/source_id/deadline_at` |
 | Nhãn Sắp hết hạn / Đã hết hạn | Tính từ `notifications.deadline_at` |
-| Loại trùng, nút "Xem bản gốc" | `notifications.source_url` duy nhất |
+| Loại trùng, nút "Xem bản gốc" | `notifications.source_url` duy nhất một phần (xem §6) |
 | Thêm/sửa/tắt nguồn, ẩn thông báo lỗi, nhập tay | `notification_sources.is_active/kind`, `notifications.is_hidden/created_by` |
 | Đổi vai trò, khóa tài khoản | `profiles.role`, `profiles.is_locked` |
-| Lọc tài liệu theo Khoa, Học kỳ, Loại | `documents.course_id` → `courses.faculty_id`, `semester`, `doc_type` |
+| Lọc tài liệu theo Khoa, Học kỳ, Loại | `documents.course_id` → `courses.faculty_id`, `semester`, `doc_type` — ⚠️ `semester` cần thống nhất định dạng, xem §10 |
 | Duyệt hoặc từ chối kèm lý do | `documents.status/reject_reason/reviewed_by/reviewed_at` |
-| Tích điểm khi được duyệt, không cộng trùng | `point_transactions` + `UNIQUE (document_id, reason)` |
+| Tích điểm khi được duyệt, không cộng trùng | `point_transactions` + chỉ mục duy nhất một phần `(document_id, reason)` |
 | Bảng xếp hạng, level | `profiles.total_points`, `profiles.level` |
 | Kho template Word, PowerPoint, LaTeX | `templates.file_type` |
 | AI trả lời kèm trích dẫn nguồn | `kb_chunks.page_ref` → `kb_documents.title/source_url` |
 | Admin tải PDF quy chế mới vào Knowledge Base | `kb_documents` → `kb_chunks` |
+| Báo cáo/gỡ tài liệu bị phản ánh (bản quyền) | ⚠️ **Chưa có bảng.** `CODING_CONVENTION.md` §13 yêu cầu chức năng này — xem §10 |
 
-## 9. Quyết định thiết kế đã chọn (cần Huy và nhóm xác nhận)
+## 9. Quyết định thiết kế đã chốt (cần Huy và nhóm xác nhận)
 
 1. **Một kiểu `id` cho mọi bảng: `uuid`.** `profiles.id` buộc là `uuid`; dùng `uuid` cho tất cả giúp frontend và API chỉ có một kiểu id (chuỗi).
 2. **Vai trò là một cột của `profiles`** (3 giá trị cố định, mỗi người một vai trò), chưa có bảng `roles`. File kế hoạch ghi S2-02 làm bảng "vai trò", cần hỏi lại xem nhóm hiểu thế nào.
@@ -488,14 +531,19 @@ Bật Row Level Security cho mọi bảng. Phần thực thi chi tiết viết t
 6. **Điểm lấy từ `point_transactions`; `profiles.total_points` là số lưu sẵn** để xếp hạng nhanh. Server cập nhật cả hai trong cùng một transaction.
 7. **Lưu `file_path`**, không gắn cứng URL, vì chưa chốt Cloudinary hay Supabase Storage (S3-03).
 8. **`notifications.source_url` cho phép trống** để nhập tay được thông báo không có liên kết; khi đó khóa duy nhất không áp dụng để loại trùng.
+9. **`UNIQUE` trên bảng có `deleted_at` là chỉ mục duy nhất một phần** (`WHERE deleted_at IS NULL`), để sau khi xóa mềm vẫn tạo lại được bản ghi trùng giá trị cũ. Áp dụng cho `courses.code`, `notification_sources.url`, `notifications.source_url`.
+10. **Bảng xếp hạng đọc qua view**, không dựa vào RLS của `profiles` — vì RLS không giấu được từng cột (xem §7.1).
 
-## 10. Chưa vẽ, cần cả nhóm quyết định
+## 10. Câu hỏi mở — cần nhóm quyết
 
-| Hạng mục | Vì sao chưa vẽ |
-|---|---|
-| Lịch sử trò chuyện với chatbot (`chat_sessions`, `chat_messages`) | SRS không yêu cầu lưu; câu hỏi là dữ liệu cá nhân, cần cân nhắc quyền riêng tư |
-| Phần thưởng đổi điểm (gói màu giao diện, khung Avatar) | Mô tả bài toán có nhắc, nhưng danh sách chức năng chỉ yêu cầu điểm, level, bảng xếp hạng |
-| Bảng cấu hình `levels` (mốc điểm từng cấp) | Có thể là hằng số trong code ở bản đầu |
-| Nhật ký thu thập (`crawl_runs`) | Chỉ cần khi gỡ lỗi bộ thu thập ở S2-03 |
-| Lịch sử kiểm duyệt (`moderation_logs`) | `documents` mới ghi lần duyệt gần nhất |
-| Báo cáo vi phạm tài liệu | SRS chưa có |
+| Hạng mục | Vì sao chưa vẽ | Người quyết | Mốc |
+|---|---|---|---|
+| Lịch sử trò chuyện với chatbot (`chat_sessions`, `chat_messages`) | SRS không yêu cầu lưu; câu hỏi là dữ liệu cá nhân, cần cân nhắc quyền riêng tư | | |
+| Phần thưởng đổi điểm (gói màu giao diện, khung Avatar) | Mô tả bài toán có nhắc, nhưng danh sách chức năng chỉ yêu cầu điểm, level, bảng xếp hạng | | |
+| Bảng cấu hình `levels` (mốc điểm từng cấp) | Có thể là hằng số trong code ở bản đầu | | |
+| Nhật ký thu thập (`crawl_runs`) | Chỉ cần khi gỡ lỗi bộ thu thập ở S2-03 | | |
+| Lịch sử kiểm duyệt (`moderation_logs`) | `documents` mới ghi lần duyệt gần nhất | | |
+| Báo cáo vi phạm tài liệu (`document_reports`) | **`CODING_CONVENTION.md` §13 đã yêu cầu chức năng báo cáo/gỡ** → không nên để lâu | | |
+| Chuẩn hóa `documents.semester` (bảng `semesters` hay `CHECK` mã học kỳ) | Cột chữ tự do dễ sai định dạng, hỏng phép lọc theo học kỳ | | |
+| Lọc quy chế theo khóa (`regulations.cohort_from`/`cohort_to`) | `applicable_cohort` là chữ tự do nên §8 hứa "lọc theo khóa" chưa làm được | | |
+| Che tên ở bảng xếp hạng | `full_name` là dữ liệu cá nhân (`RULES.md` §6.1); chưa chốt hiển thị tên thật hay ẩn danh | | |
