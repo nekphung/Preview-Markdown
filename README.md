@@ -37,6 +37,8 @@ Sơ đồ viết bằng Mermaid nên GitHub hiển thị trực tiếp; sửa s�
 
 Quy ước đọc: `||` = bắt buộc có (NOT NULL) · `o|` = có thể trống (NULL) · `o{` = nhiều.
 
+> **Lưu ý khi sửa sơ đồ:** cú pháp Mermaid **chỉ nhận một ràng buộc cho mỗi cột**, nên không viết được kiểu `uuid id PK, FK` hay `text name NN, UK` — GitHub sẽ báo lỗi parse. Muốn ghi nhiều ràng buộc thì để trong phần chú thích sau dấu nháy kép, ví dụ `uuid id PK "khóa chính, trùng auth.users.id"`. Ràng buộc đầy đủ vẫn nằm ở từ điển dữ liệu §4.
+
 ```mermaid
 erDiagram
     faculties o|--o{ profiles : "có sinh viên"
@@ -69,7 +71,7 @@ erDiagram
         timestamptz updated_at
     }
     profiles {
-        uuid id PK, FK "trùng auth.users.id"
+        uuid id PK "khóa chính, trùng auth.users.id"
         uuid faculty_id FK
         text full_name
         text student_id UK "MSSV"
@@ -146,7 +148,7 @@ erDiagram
     }
     tags {
         uuid id PK
-        text name NN, UK
+        text name UK "bắt buộc có, tên Tag"
         timestamptz created_at
         timestamptz updated_at
         timestamptz deleted_at
